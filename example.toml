@@ -1,0 +1,24 @@
+# Vitals Configuration
+# Global configuration
+[global]
+timeout = 5  # Maximum request timeout in seconds
+
+# Target configurations
+
+# Example of another API health check configuration
+[targets.example_api]
+name = "EXAMPLE API"
+base_urls = [
+    "https://api.example.com",
+    "https://api-backup.example.com"
+]
+endpoints = [
+    "health",
+    "status",
+    "v1/ping"
+]
+headers = { "Authorization" = "Bearer YOUR_TOKEN_HERE", "Content-Type" = "application/json" }
+# Only accept 200 (OK) and 204 (No Content)
+status_codes = [200, 204]
+# Also accept any status in the 2xx range
+status_ranges = ["200-299"]
