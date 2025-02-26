@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -68,6 +69,15 @@ func isStatusAcceptable(status int, codes []int, ranges []StatusRange) bool {
 	return false
 }
 
+// RequestStatus represents the status of a request
+type RequestStatus struct {
+	URL        string
+	StatusCode int
+	IsComplete bool
+	IsSuccess  bool
+	Error      error
+}
+
 func main() {
 	// Read config file path from command line or use default
 	configFile := "vitals.toml"
@@ -93,19 +103,27 @@ func main() {
 		Timeout: time.Duration(timeout) * time.Second,
 	}
 
-	// Create color output
+	// Create color output functions
 	green := color.New(color.FgGreen).SprintFunc()
 	red := color.New(color.FgRed).SprintFunc()
+	yellow := color.New(color.FgYellow).SprintFunc()
 
 	// Process each target group
-	for targetName, target := range config.Targets {
+	isFirstTarget := true
+	for _, targetConfig := range config.Targets {
+		// Only print newline separator after the first target
+		if !isFirstTarget {
+			fmt.Println()
+		}
+		isFirstTarget = false
+
 		fmt.Println("--------------------------------------------------------------------------")
-		fmt.Printf("%s\n", targetName)
+		fmt.Printf("%s\n", targetConfig.Name)
 		fmt.Println("--------------------------------------------------------------------------")
 
 		// Parse status ranges
 		var statusRanges []StatusRange
-		for _, rangeStr := range target.StatusRanges {
+		for _, rangeStr := range targetConfig.StatusRanges {
 			r, err := parseStatusRange(rangeStr)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error parsing status range '%s': %s\n", rangeStr, err)
@@ -115,56 +133,215 @@ func main() {
 		}
 
 		// Default to 200 if no status codes or ranges specified
-		if len(target.StatusCodes) == 0 && len(statusRanges) == 0 {
-			target.StatusCodes = []int{200}
+		if len(targetConfig.StatusCodes) == 0 && len(statusRanges) == 0 {
+			targetConfig.StatusCodes = []int{200}
 		}
 
-		var wg sync.WaitGroup
-		for _, baseURL := range target.BaseURLs {
-			for _, endpoint := range target.Endpoints {
-				wg.Add(1)
-				go func(baseURL, endpoint string) {
-					defer wg.Done()
+		// Generate all URLs
+		var urls []string
+		uniqueUrls := make(map[string]bool)
 
-					// Construct full URL
-					url := baseURL
-					if endpoint != "" {
-						if endpoint[0] != '/' && baseURL[len(baseURL)-1] != '/' {
-							url += "/"
-						}
-						url += endpoint
+		for _, baseURL := range targetConfig.BaseURLs {
+			for _, endpoint := range targetConfig.Endpoints {
+				// Construct full URL
+				url := baseURL
+				if endpoint != "" {
+					if endpoint[0] != '/' && baseURL[len(baseURL)-1] != '/' {
+						url += "/"
 					}
+					url += endpoint
+				}
 
-					// Create request
-					req, err := http.NewRequest("GET", url, nil)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error creating request for %s: %s\n", url, err)
-						fmt.Println(red(fmt.Sprintf("GET %s", url)))
-						return
-					}
-
-					// Add headers
-					for key, value := range target.Headers {
-						req.Header.Add(key, value)
-					}
-
-					// Send request
-					resp, err := client.Do(req)
-					if err != nil {
-						fmt.Println(red(fmt.Sprintf("GET %s", url)))
-						return
-					}
-					defer resp.Body.Close()
-
-					// Check status code
-					if isStatusAcceptable(resp.StatusCode, target.StatusCodes, statusRanges) {
-						fmt.Println(green(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
-					} else {
-						fmt.Println(red(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
-					}
-				}(baseURL, endpoint)
+				// Only add unique URLs
+				if !uniqueUrls[url] {
+					urls = append(urls, url)
+					uniqueUrls[url] = true
+				}
 			}
 		}
-		wg.Wait()
+
+		// Sort URLs for consistent display
+		sort.Strings(urls)
+
+		// Tracking for completions
+		var wg sync.WaitGroup
+		results := make(map[string]*RequestStatus)
+		var resultsMutex sync.Mutex
+
+		// Spinner chars for animation
+		spinnerChars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		var spinnerIdx int
+		spinnerTicker := time.NewTicker(100 * time.Millisecond)
+		defer spinnerTicker.Stop()
+
+		// Map to track the line number for each URL
+		lineMap := make(map[string]int)
+
+		// Print initial state for all URLs
+		for i, url := range urls {
+			lineMap[url] = i
+			fmt.Printf("%s GET %s\n", yellow(spinnerChars[0]), url)
+
+			// Initialize results
+			results[url] = &RequestStatus{
+				URL:        url,
+				IsComplete: false,
+			}
+		}
+
+		// Start requests
+		for _, url := range urls {
+			wg.Add(1)
+
+			// Create a copy of url for the goroutine
+			urlCopy := url
+
+			go func() {
+				defer wg.Done()
+
+				// Create request
+				req, err := http.NewRequest("GET", urlCopy, nil)
+				if err != nil {
+					resultsMutex.Lock()
+					results[urlCopy].IsComplete = true
+					results[urlCopy].Error = err
+					resultsMutex.Unlock()
+					return
+				}
+
+				// Add headers
+				for key, value := range targetConfig.Headers {
+					req.Header.Add(key, value)
+				}
+
+				// Send request
+				resp, err := client.Do(req)
+
+				resultsMutex.Lock()
+				if err != nil {
+					results[urlCopy].IsComplete = true
+					results[urlCopy].Error = err
+				} else {
+					defer resp.Body.Close()
+					results[urlCopy].IsComplete = true
+					results[urlCopy].StatusCode = resp.StatusCode
+					results[urlCopy].IsSuccess = isStatusAcceptable(resp.StatusCode, targetConfig.StatusCodes, statusRanges)
+				}
+				resultsMutex.Unlock()
+			}()
+		}
+
+		// Channel to signal when all requests are done
+		done := make(chan struct{})
+
+		// Start a goroutine to monitor for completion
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		// Map to track which URLs have been updated with final status
+		updated := make(map[string]bool)
+
+		// Update spinner and results until all requests complete
+		lineCount := len(urls)
+	updateLoop:
+		for {
+			select {
+			case <-spinnerTicker.C:
+				// Update spinner index
+				spinnerIdx = (spinnerIdx + 1) % len(spinnerChars)
+
+				resultsMutex.Lock()
+
+				// Update display for each URL
+				for _, url := range urls {
+					// Skip if already updated with final status
+					if updated[url] {
+						continue
+					}
+
+					// Get line number and status
+					lineNum := lineMap[url]
+					status := results[url]
+
+					// Move cursor to correct line
+					// Need to move up (lineCount - lineNum - 1) lines from current position
+					moveUp := lineCount - lineNum - 1
+					if moveUp > 0 {
+						fmt.Printf("\033[%dA", moveUp)
+					}
+
+					// Clear line
+					fmt.Print("\r\033[K")
+
+					// Update content
+					if status.IsComplete {
+						// Show final status
+						if status.Error != nil {
+							fmt.Printf("%s", red(fmt.Sprintf("✗ GET %s - Error: %v", url, status.Error)))
+						} else if status.IsSuccess {
+							fmt.Printf("%s", green(fmt.Sprintf("✓ GET %s - %d", url, status.StatusCode)))
+						} else {
+							fmt.Printf("%s", red(fmt.Sprintf("✗ GET %s - %d", url, status.StatusCode)))
+						}
+						updated[url] = true
+					} else {
+						// Show spinner
+						fmt.Printf("%s GET %s", yellow(spinnerChars[spinnerIdx]), url)
+					}
+
+					// Move back down
+					if moveUp > 0 {
+						fmt.Printf("\033[%dB", moveUp)
+					}
+				}
+
+				resultsMutex.Unlock()
+
+				// Move cursor to beginning of current line
+				fmt.Print("\r")
+
+			case <-done:
+				// All requests have completed
+
+				// Make sure all URLs have their final status displayed
+				resultsMutex.Lock()
+				for _, url := range urls {
+					if !updated[url] {
+						// Get line number and status
+						lineNum := lineMap[url]
+						status := results[url]
+
+						// Move cursor to correct line
+						moveUp := lineCount - lineNum - 1
+						if moveUp > 0 {
+							fmt.Printf("\033[%dA", moveUp)
+
+						}
+
+						// Clear line
+						fmt.Print("\r\033[K")
+
+						// Show final status
+						if status.Error != nil {
+							fmt.Printf("%s", red(fmt.Sprintf("✗ GET %s - Error: %v", url, status.Error)))
+						} else if status.IsSuccess {
+							fmt.Printf("%s", green(fmt.Sprintf("✓ GET %s - %d", url, status.StatusCode)))
+						} else {
+							fmt.Printf("%s", red(fmt.Sprintf("✗ GET %s - %d", url, status.StatusCode)))
+						}
+
+						// Move back down
+						if moveUp > 0 {
+							fmt.Printf("\033[%dB", moveUp)
+						}
+					}
+				}
+				resultsMutex.Unlock()
+
+				break updateLoop
+			}
+		}
 	}
 }
