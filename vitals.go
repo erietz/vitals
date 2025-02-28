@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -156,11 +157,18 @@ func main() {
 					}
 					defer resp.Body.Close()
 
+					body, err := io.ReadAll(resp.Body)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error reading response body for %s: %s\n", url, err)
+						fmt.Println(red(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
+						return
+					}
+
 					// Check status code
 					if isStatusAcceptable(resp.StatusCode, target.StatusCodes, statusRanges) {
 						fmt.Println(green(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
 					} else {
-						fmt.Println(red(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
+						fmt.Println(red(fmt.Sprintf("GET %s - %d - %s", url, resp.StatusCode, string(body))))
 					}
 				}(baseURL, endpoint)
 			}
