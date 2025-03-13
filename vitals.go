@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,7 +145,8 @@ type EndpointResult struct {
 }
 
 // processTarget handles checking all endpoints for a single target
-func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, wg *sync.WaitGroup, sem chan struct{}, verbose bool) []EndpointResult {
+func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, sem chan struct{}, verbose bool) []EndpointResult {
+	var wg sync.WaitGroup
 	resultsChan := make(chan EndpointResult)
 	var resultsCount int
 
@@ -240,32 +242,145 @@ func constructURL(baseURL, endpoint string) string {
 	return baseURL + endpoint
 }
 
-// printResults formats and prints the collected endpoint results
+// printDivider prints a horizontal divider line for the table
+func printDivider(widths map[string]int) {
+	fmt.Print("+")
+	for _, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+		fmt.Print(strings.Repeat("-", widths[width]+2) + "+")
+	}
+	fmt.Println()
+}
+
+// printRow prints a single row of the table with proper padding
+func printRow(method, url string, status interface{}, duration, result string, widths map[string]int) {
+	fmt.Printf("| %-*s | %-*s | %-*v | %-*s | %-*s |\n",
+		widths["METHOD"], method,
+		widths["URL"], url,
+		widths["STATUS"], status,
+		widths["DURATION"], duration,
+		widths["RESULT"], result)
+}
+
+// printResults formats and prints the collected endpoint results in a table
 func printResults(results []EndpointResult, green, red func(a ...interface{}) string, verbose bool) {
 	var successful, failed int
 	var totalDuration time.Duration
 
+	// Calculate column widths
+	widths := map[string]int{
+		"METHOD":   6,  // "METHOD"
+		"URL":      3,  // "URL"
+		"STATUS":   6,  // "STATUS"
+		"DURATION": 10, // "DURATION"
+		"RESULT":   6,  // "RESULT"
+	}
+
+	// Pre-process results to determine column widths
+	tableData := make([][]string, 0, len(results))
 	for _, result := range results {
+		method := "GET"
+		urlStr := result.URL
+		var status interface{}
+		duration := fmt.Sprintf("%.2fs", result.Duration.Seconds())
+		var resultStr string
+
 		if result.Error != nil {
-			fmt.Println(red(fmt.Sprintf("GET %s - Error: %v", result.URL, result.Error)))
+			status = "ERROR"
+			resultStr = fmt.Sprintf("Error: %v", result.Error)
 			failed++
-			continue
-		}
-
-		if result.Success {
-			responseMsg := fmt.Sprintf("GET %s - %d (%.2fs)", result.URL, result.StatusCode, result.Duration.Seconds())
-			if verbose {
-				responseMsg += fmt.Sprintf(" - %s", result.ResponseBody)
-			}
-			fmt.Println(green(responseMsg))
-			successful++
 		} else {
-			fmt.Println(red(fmt.Sprintf("GET %s - %d - %s", result.URL, result.StatusCode, result.ResponseBody)))
-			failed++
+			status = result.StatusCode
+			if result.Success {
+				resultStr = "Success"
+				successful++
+			} else {
+				resultStr = "Failed"
+				failed++
+			}
 		}
 
+		// Update max widths
+		if len(method) > widths["METHOD"] {
+			widths["METHOD"] = len(method)
+		}
+		if len(urlStr) > widths["URL"] {
+			widths["URL"] = len(urlStr)
+		}
+		// Limit URL length if it's too long
+		if widths["URL"] > 60 {
+			widths["URL"] = 60
+		}
+		statusLen := len(fmt.Sprintf("%v", status))
+		if statusLen > widths["STATUS"] {
+			widths["STATUS"] = statusLen
+		}
+		if len(duration) > widths["DURATION"] {
+			widths["DURATION"] = len(duration)
+		}
+		if len(resultStr) > widths["RESULT"] {
+			widths["RESULT"] = len(resultStr)
+		}
+
+		tableData = append(tableData, []string{method, urlStr, fmt.Sprintf("%v", status), duration, resultStr})
 		totalDuration += result.Duration
 	}
+
+	// Print table header
+	printDivider(widths)
+	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths)
+	printDivider(widths)
+
+	// Print table rows
+	for i, row := range tableData {
+		method := row[0]
+		url := row[1]
+		if len(url) > 60 {
+			url = url[:57] + "..."
+		}
+		status := row[2]
+		duration := row[3]
+		resultStr := row[4]
+
+		if strings.HasPrefix(resultStr, "Error:") || resultStr == "Failed" {
+			// Color the whole row red for failures
+			printRow(
+				red(method),
+				red(url),
+				red(status),
+				red(duration),
+				red(resultStr),
+				widths,
+			)
+		} else {
+			// Color the whole row green for successes
+			printRow(
+				green(method),
+				green(url),
+				green(status),
+				green(duration),
+				green(resultStr),
+				widths,
+			)
+		}
+
+		// If verbose and there's response body, print it under the row
+		if verbose && len(results[i].ResponseBody) > 0 && results[i].Error == nil {
+			fmt.Println("|" + strings.Repeat(" ", widths["METHOD"]+widths["URL"]+widths["STATUS"]+widths["DURATION"]+widths["RESULT"]+13) + "|")
+
+			// Truncate response body if too long
+			responseBody := results[i].ResponseBody
+			maxBodyLen := widths["METHOD"] + widths["URL"] + widths["STATUS"] + widths["DURATION"] + widths["RESULT"] + 11
+			if len(responseBody) > maxBodyLen {
+				responseBody = responseBody[:maxBodyLen-3] + "..."
+			}
+
+			fmt.Printf("| Response: %-*s |\n",
+				widths["METHOD"]+widths["URL"]+widths["STATUS"]+widths["DURATION"]+widths["RESULT"]+1,
+				responseBody)
+		}
+	}
+
+	printDivider(widths)
 
 	// Print statistics summary
 	total := successful + failed
@@ -279,7 +394,6 @@ func printResults(results []EndpointResult, green, red func(a ...interface{}) st
 
 func main() {
 	flags := parseFlags()
-
 	config, err := loadConfig(flags.configFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -317,11 +431,7 @@ func main() {
 			target.StatusCodes = []int{200}
 		}
 
-		var wg sync.WaitGroup
-		results := processTarget(client, target, statusRanges, &wg, sem, flags.verbosity)
-		wg.Wait()
-
-		// Print the results after all checks are complete
+		results := processTarget(client, target, statusRanges, sem, flags.verbosity)
 		printResults(results, green, red, flags.verbosity)
 	}
 }
