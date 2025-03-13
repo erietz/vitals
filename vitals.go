@@ -133,10 +133,24 @@ func setupColorOutput() (func(a ...interface{}) string, func(a ...interface{}) s
 		color.New(color.FgRed).SprintFunc()
 }
 
+// EndpointResult represents the result of checking a single endpoint
+type EndpointResult struct {
+	URL          string
+	StatusCode   int
+	ResponseBody string
+	Error        error
+	Duration     time.Duration
+	Success      bool
+}
+
 // processTarget handles checking all endpoints for a single target
-func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, green, red func(a ...interface{}) string, wg *sync.WaitGroup, sem chan struct{}, verbose bool) {
+func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, wg *sync.WaitGroup, sem chan struct{}, verbose bool) []EndpointResult {
+	resultsChan := make(chan EndpointResult)
+	var resultsCount int
+
 	for _, baseURL := range target.BaseURLs {
 		for _, endpoint := range target.Endpoints {
+			resultsCount++
 			wg.Add(1)
 			go func(baseURL, endpoint string) {
 				defer wg.Done()
@@ -147,21 +161,39 @@ func processTarget(client *http.Client, target TargetConfig, statusRanges []Stat
 					defer func() { <-sem }() // Release
 				}
 
-				checkEndpoint(client, baseURL, endpoint, target, statusRanges, green, red, verbose)
+				result := checkEndpoint(client, baseURL, endpoint, target, statusRanges, verbose)
+				resultsChan <- result
 			}(baseURL, endpoint)
 		}
 	}
+
+	// Collect results
+	results := make([]EndpointResult, 0, resultsCount)
+	go func() {
+		for i := 0; i < resultsCount; i++ {
+			results = append(results, <-resultsChan)
+		}
+		close(resultsChan)
+	}()
+
+	wg.Wait()
+	return results
 }
 
 // checkEndpoint performs the HTTP request and checks the response
-func checkEndpoint(client *http.Client, baseURL, endpoint string, target TargetConfig, statusRanges []StatusRange, green, red func(a ...interface{}) string, verbose bool) {
+func checkEndpoint(client *http.Client, baseURL, endpoint string, target TargetConfig, statusRanges []StatusRange, verbose bool) EndpointResult {
 	url := constructURL(baseURL, endpoint)
+
+	result := EndpointResult{
+		URL: url,
+	}
+
+	startTime := time.Now()
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating request for %s: %s\n", url, err)
-		fmt.Println(red(fmt.Sprintf("GET %s", url)))
-		return
+		result.Error = fmt.Errorf("error creating request: %s", err)
+		return result
 	}
 
 	// Add headers
@@ -176,27 +208,25 @@ func checkEndpoint(client *http.Client, baseURL, endpoint string, target TargetC
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println(red(fmt.Sprintf("GET %s - Error: %v", url, err)))
-		return
+		result.Error = err
+		result.Duration = time.Since(startTime)
+		return result
 	}
 	defer resp.Body.Close()
 
+	result.StatusCode = resp.StatusCode
+	result.Duration = time.Since(startTime)
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading response body for %s: %s\n", url, err)
-		fmt.Println(red(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
-		return
+		result.Error = fmt.Errorf("error reading response body: %s", err)
+		return result
 	}
 
-	if isStatusAcceptable(resp.StatusCode, target.StatusCodes, statusRanges) {
-		responseMsg := fmt.Sprintf("GET %s - %d", url, resp.StatusCode)
-		if verbose {
-			responseMsg += fmt.Sprintf(" - %s", string(body))
-		}
-		fmt.Println(green(responseMsg))
-	} else {
-		fmt.Println(red(fmt.Sprintf("GET %s - %d - %s", url, resp.StatusCode, string(body))))
-	}
+	result.ResponseBody = string(body)
+	result.Success = isStatusAcceptable(resp.StatusCode, target.StatusCodes, statusRanges)
+
+	return result
 }
 
 // constructURL builds the full URL from base URL and endpoint
@@ -208,6 +238,43 @@ func constructURL(baseURL, endpoint string) string {
 		return baseURL + "/" + endpoint
 	}
 	return baseURL + endpoint
+}
+
+// printResults formats and prints the collected endpoint results
+func printResults(results []EndpointResult, green, red func(a ...interface{}) string, verbose bool) {
+	var successful, failed int
+	var totalDuration time.Duration
+
+	for _, result := range results {
+		if result.Error != nil {
+			fmt.Println(red(fmt.Sprintf("GET %s - Error: %v", result.URL, result.Error)))
+			failed++
+			continue
+		}
+
+		if result.Success {
+			responseMsg := fmt.Sprintf("GET %s - %d (%.2fs)", result.URL, result.StatusCode, result.Duration.Seconds())
+			if verbose {
+				responseMsg += fmt.Sprintf(" - %s", result.ResponseBody)
+			}
+			fmt.Println(green(responseMsg))
+			successful++
+		} else {
+			fmt.Println(red(fmt.Sprintf("GET %s - %d - %s", result.URL, result.StatusCode, result.ResponseBody)))
+			failed++
+		}
+
+		totalDuration += result.Duration
+	}
+
+	// Print statistics summary
+	total := successful + failed
+	if total > 0 {
+		avgDuration := totalDuration / time.Duration(total)
+		fmt.Println("\nSummary:")
+		fmt.Printf("Total: %d, Successful: %d, Failed: %d\n", total, successful, failed)
+		fmt.Printf("Average response time: %.2fs\n", avgDuration.Seconds())
+	}
 }
 
 func main() {
@@ -251,7 +318,10 @@ func main() {
 		}
 
 		var wg sync.WaitGroup
-		processTarget(client, target, statusRanges, green, red, &wg, sem, flags.verbosity)
+		results := processTarget(client, target, statusRanges, &wg, sem, flags.verbosity)
 		wg.Wait()
+
+		// Print the results after all checks are complete
+		printResults(results, green, red, flags.verbosity)
 	}
 }
