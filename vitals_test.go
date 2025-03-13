@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -170,5 +171,87 @@ status_codes = [200]
 	}
 	if len(api1.StatusRanges) != 1 || api1.StatusRanges[0] != "500-599" {
 		t.Errorf("Unexpected status_ranges: %v", api1.StatusRanges)
+	}
+}
+
+// Add a test for the constructURL function
+func TestConstructURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseURL  string
+		endpoint string
+		want     string
+	}{
+		{
+			name:     "empty endpoint",
+			baseURL:  "http://example.com",
+			endpoint: "",
+			want:     "http://example.com",
+		},
+		{
+			name:     "endpoint with slash",
+			baseURL:  "http://example.com",
+			endpoint: "/api",
+			want:     "http://example.com/api",
+		},
+		{
+			name:     "endpoint without slash",
+			baseURL:  "http://example.com",
+			endpoint: "api",
+			want:     "http://example.com/api",
+		},
+		{
+			name:     "base URL with trailing slash",
+			baseURL:  "http://example.com/",
+			endpoint: "api",
+			want:     "http://example.com/api",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := constructURL(tt.baseURL, tt.endpoint)
+			if got != tt.want {
+				t.Errorf("constructURL() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Add a test for the setupHTTPClient function
+func TestSetupHTTPClient(t *testing.T) {
+	tests := []struct {
+		name        string
+		configTime  int
+		cliTime     int
+		wantTimeout time.Duration
+	}{
+		{
+			name:        "use config timeout",
+			configTime:  10,
+			cliTime:     0,
+			wantTimeout: 10 * time.Second,
+		},
+		{
+			name:        "use CLI timeout",
+			configTime:  10,
+			cliTime:     20,
+			wantTimeout: 20 * time.Second,
+		},
+		{
+			name:        "use default timeout",
+			configTime:  0,
+			cliTime:     0,
+			wantTimeout: 5 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := setupHTTPClient(tt.configTime, tt.cliTime)
+			if client.Timeout != tt.wantTimeout {
+				t.Errorf("setupHTTPClient() timeout = %v, want %v", client.Timeout, tt.wantTimeout)
+			}
+		})
 	}
 }
