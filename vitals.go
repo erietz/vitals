@@ -69,34 +69,107 @@ func isStatusAcceptable(status int, codes []int, ranges []StatusRange) bool {
 	return false
 }
 
+// loadConfig loads and validates the configuration file
+func loadConfig(configFile string) (Config, error) {
+	var config Config
+	if _, err := toml.DecodeFile(configFile, &config); err != nil {
+		return Config{}, fmt.Errorf("error reading config file: %s", err)
+	}
+	return config, nil
+}
+
+// setupHTTPClient creates an HTTP client with the specified timeout
+func setupHTTPClient(timeout int) *http.Client {
+	if timeout <= 0 {
+		timeout = 5 // default timeout
+	}
+	return &http.Client{
+		Timeout: time.Duration(timeout) * time.Second,
+	}
+}
+
+// setupColorOutput returns colored output functions
+func setupColorOutput() (func(a ...interface{}) string, func(a ...interface{}) string) {
+	return color.New(color.FgGreen).SprintFunc(),
+		color.New(color.FgRed).SprintFunc()
+}
+
+// processTarget handles checking all endpoints for a single target
+func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, green, red func(a ...interface{}) string, wg *sync.WaitGroup) {
+	for _, baseURL := range target.BaseURLs {
+		for _, endpoint := range target.Endpoints {
+			wg.Add(1)
+			go func(baseURL, endpoint string) {
+				defer wg.Done()
+				checkEndpoint(client, baseURL, endpoint, target, statusRanges, green, red)
+			}(baseURL, endpoint)
+		}
+	}
+}
+
+// checkEndpoint performs the HTTP request and checks the response
+func checkEndpoint(client *http.Client, baseURL, endpoint string, target TargetConfig, statusRanges []StatusRange, green, red func(a ...interface{}) string) {
+	url := constructURL(baseURL, endpoint)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating request for %s: %s\n", url, err)
+		fmt.Println(red(fmt.Sprintf("GET %s", url)))
+		return
+	}
+
+	// Add headers
+	for key, value := range target.Headers {
+		req.Header.Add(key, value)
+	}
+
+	// Send request
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println(red(fmt.Sprintf("GET %s", url)))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading response body for %s: %s\n", url, err)
+		fmt.Println(red(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
+		return
+	}
+
+	if isStatusAcceptable(resp.StatusCode, target.StatusCodes, statusRanges) {
+		fmt.Println(green(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
+	} else {
+		fmt.Println(red(fmt.Sprintf("GET %s - %d - %s", url, resp.StatusCode, string(body))))
+	}
+}
+
+// constructURL builds the full URL from base URL and endpoint
+func constructURL(baseURL, endpoint string) string {
+	if endpoint == "" {
+		return baseURL
+	}
+	if endpoint[0] != '/' && baseURL[len(baseURL)-1] != '/' {
+		return baseURL + "/" + endpoint
+	}
+	return baseURL + endpoint
+}
+
 func main() {
-	// Read config file path from command line or use default
 	configFile := "vitals.toml"
 	if len(os.Args) > 1 {
 		configFile = os.Args[1]
 	}
 
-	// Parse config file
-	var config Config
-	if _, err := toml.DecodeFile(configFile, &config); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading config file: %s\n", err)
+	config, err := loadConfig(configFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(1)
 	}
 
-	// Set default timeout if not specified
-	timeout := 5
-	if config.Global.Timeout > 0 {
-		timeout = config.Global.Timeout
-	}
-
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: time.Duration(timeout) * time.Second,
-	}
-
-	// Create color output
-	green := color.New(color.FgGreen).SprintFunc()
-	red := color.New(color.FgRed).SprintFunc()
+	client := setupHTTPClient(config.Global.Timeout)
+	green, red := setupColorOutput()
 
 	// Process each target group
 	for targetName, target := range config.Targets {
@@ -121,58 +194,7 @@ func main() {
 		}
 
 		var wg sync.WaitGroup
-		for _, baseURL := range target.BaseURLs {
-			for _, endpoint := range target.Endpoints {
-				wg.Add(1)
-				go func(baseURL, endpoint string) {
-					defer wg.Done()
-
-					// Construct full URL
-					url := baseURL
-					if endpoint != "" {
-						if endpoint[0] != '/' && baseURL[len(baseURL)-1] != '/' {
-							url += "/"
-						}
-						url += endpoint
-					}
-
-					// Create request
-					req, err := http.NewRequest("GET", url, nil)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error creating request for %s: %s\n", url, err)
-						fmt.Println(red(fmt.Sprintf("GET %s", url)))
-						return
-					}
-
-					// Add headers
-					for key, value := range target.Headers {
-						req.Header.Add(key, value)
-					}
-
-					// Send request
-					resp, err := client.Do(req)
-					if err != nil {
-						fmt.Println(red(fmt.Sprintf("GET %s", url)))
-						return
-					}
-					defer resp.Body.Close()
-
-					body, err := io.ReadAll(resp.Body)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error reading response body for %s: %s\n", url, err)
-						fmt.Println(red(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
-						return
-					}
-
-					// Check status code
-					if isStatusAcceptable(resp.StatusCode, target.StatusCodes, statusRanges) {
-						fmt.Println(green(fmt.Sprintf("GET %s - %d", url, resp.StatusCode)))
-					} else {
-						fmt.Println(red(fmt.Sprintf("GET %s - %d - %s", url, resp.StatusCode, string(body))))
-					}
-				}(baseURL, endpoint)
-			}
-		}
+		processTarget(client, target, statusRanges, green, red, &wg)
 		wg.Wait()
 	}
 }
