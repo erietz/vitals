@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
+	"slices"
 )
 
 // Config represents the top-level configuration structure
@@ -55,10 +55,8 @@ func parseStatusRange(rangeStr string) (StatusRange, error) {
 // isStatusAcceptable checks if the status code is in the acceptable list or ranges
 func isStatusAcceptable(status int, codes []int, ranges []StatusRange) bool {
 	// Check if status is in the list of acceptable codes
-	for _, code := range codes {
-		if status == code {
-			return true
-		}
+	if slices.Contains(codes, status) {
+		return true
 	}
 
 	// Check if status is in any of the acceptable ranges
@@ -147,38 +145,28 @@ type EndpointResult struct {
 
 // processTarget handles checking all endpoints for a single target
 func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, sem chan struct{}, verbose bool) []EndpointResult {
-	var wg sync.WaitGroup
 	resultsCount := len(target.BaseURLs) * len(target.Endpoints)
 	resultsChan := make(chan EndpointResult, resultsCount)
 
 	for _, baseURL := range target.BaseURLs {
 		for _, endpoint := range target.Endpoints {
-			wg.Add(1)
 			go func(baseURL, endpoint string) {
-				defer wg.Done()
-
 				// If semaphore is provided, use it to limit concurrency
 				if sem != nil {
 					sem <- struct{}{}        // Acquire
 					defer func() { <-sem }() // Release
 				}
 
-				result := checkEndpoint(client, baseURL, endpoint, target, statusRanges, verbose)
-				resultsChan <- result
+				resultsChan <- checkEndpoint(client, baseURL, endpoint, target, statusRanges, verbose)
 			}(baseURL, endpoint)
 		}
 	}
 
-	// Create a separate goroutine to close the channel after all workers are done
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
-
 	// Collect results from the channel until it's closed
 	results := make([]EndpointResult, 0, resultsCount)
-	for result := range resultsChan {
-		results = append(results, result)
+
+	for range resultsCount {
+		results = append(results, <-resultsChan)
 	}
 
 	return results
