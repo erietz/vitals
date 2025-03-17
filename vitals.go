@@ -148,12 +148,11 @@ type EndpointResult struct {
 // processTarget handles checking all endpoints for a single target
 func processTarget(client *http.Client, target TargetConfig, statusRanges []StatusRange, sem chan struct{}, verbose bool) []EndpointResult {
 	var wg sync.WaitGroup
-	resultsChan := make(chan EndpointResult)
-	var resultsCount int
+	resultsCount := len(target.BaseURLs) * len(target.Endpoints)
+	resultsChan := make(chan EndpointResult, resultsCount)
 
 	for _, baseURL := range target.BaseURLs {
 		for _, endpoint := range target.Endpoints {
-			resultsCount++
 			wg.Add(1)
 			go func(baseURL, endpoint string) {
 				defer wg.Done()
@@ -170,16 +169,18 @@ func processTarget(client *http.Client, target TargetConfig, statusRanges []Stat
 		}
 	}
 
-	// Collect results
-	results := make([]EndpointResult, 0, resultsCount)
+	// Create a separate goroutine to close the channel after all workers are done
 	go func() {
-		for i := 0; i < resultsCount; i++ {
-			results = append(results, <-resultsChan)
-		}
+		wg.Wait()
 		close(resultsChan)
 	}()
 
-	wg.Wait()
+	// Collect results from the channel until it's closed
+	results := make([]EndpointResult, 0, resultsCount)
+	for result := range resultsChan {
+		results = append(results, result)
+	}
+
 	return results
 }
 
