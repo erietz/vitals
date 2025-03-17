@@ -129,9 +129,10 @@ func setupHTTPClient(configTimeout, cliTimeout int) *http.Client {
 }
 
 // setupColorOutput returns colored output functions
-func setupColorOutput() (func(a ...interface{}) string, func(a ...interface{}) string) {
+func setupColorOutput() (func(a ...interface{}) string, func(a ...interface{}) string, func(a ...interface{}) string) {
 	return color.New(color.FgGreen).SprintFunc(),
-		color.New(color.FgRed).SprintFunc()
+		color.New(color.FgRed).SprintFunc(),
+		color.New(color.Reset).SprintFunc() // Add neutral color for borders
 }
 
 // EndpointResult represents the result of checking a single endpoint
@@ -243,28 +244,46 @@ func constructURL(baseURL, endpoint string) string {
 }
 
 // printDivider prints a horizontal divider line for the table
-func printDivider(widths map[string]int) {
-	fmt.Print("+")
+func printDivider(widths map[string]int, neutral func(a ...interface{}) string) {
+	divider := "+"
 	for _, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
-		fmt.Print(strings.Repeat("-", widths[width]+2) + "+")
+		divider += strings.Repeat("-", widths[width]+2) + "+"
 	}
-	fmt.Println()
+	fmt.Println(neutral(divider))
 }
 
 // printRow prints a single row of the table with proper padding
-func printRow(method, url string, status interface{}, duration, result string, widths map[string]int) {
-	fmt.Printf("| %-*s | %-*s | %-*v | %-*s | %-*s |\n",
-		widths["METHOD"], method,
-		widths["URL"], url,
-		widths["STATUS"], status,
-		widths["DURATION"], duration,
-		widths["RESULT"], result)
+func printRow(method, url string, status interface{}, duration, result string, widths map[string]int, rowColor, neutral func(a ...interface{}) string) {
+	// Split the row into parts for proper coloring
+	parts := []string{
+		fmt.Sprintf(" %-*s ", widths["METHOD"], method),
+		fmt.Sprintf(" %-*s ", widths["URL"], url),
+		fmt.Sprintf(" %-*v ", widths["STATUS"], status),
+		fmt.Sprintf(" %-*s ", widths["DURATION"], duration),
+		fmt.Sprintf(" %-*s ", widths["RESULT"], result),
+	}
+
+	// Build colored row with neutral borders
+	var coloredRow string
+	coloredRow += neutral("|")
+
+	for i, part := range parts {
+		coloredRow += rowColor(part) + neutral("|")
+		if i < len(parts)-1 {
+			// No need to add extra pipe after last part
+		}
+	}
+
+	fmt.Println(coloredRow)
 }
 
 // printResults formats and prints the collected endpoint results in a table
 func printResults(results []EndpointResult, green, red func(a ...interface{}) string, verbose bool) {
 	var successful, failed int
 	var totalDuration time.Duration
+
+	// Get neutral color for borders
+	_, _, neutral := setupColorOutput()
 
 	// Calculate column widths
 	widths := map[string]int{
@@ -326,9 +345,9 @@ func printResults(results []EndpointResult, green, red func(a ...interface{}) st
 	}
 
 	// Print table header
-	printDivider(widths)
-	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths)
-	printDivider(widths)
+	printDivider(widths, neutral)
+	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths, neutral, neutral)
+	printDivider(widths, neutral)
 
 	// Print table rows
 	for i, row := range tableData {
@@ -342,45 +361,34 @@ func printResults(results []EndpointResult, green, red func(a ...interface{}) st
 		resultStr := row[4]
 
 		if strings.HasPrefix(resultStr, "Error:") || resultStr == "Failed" {
-			// Color the whole row red for failures
-			printRow(
-				red(method),
-				red(url),
-				red(status),
-				red(duration),
-				red(resultStr),
-				widths,
-			)
+			// Color the row content red for failures, but borders neutral
+			printRow(method, url, status, duration, resultStr, widths, red, neutral)
 		} else {
-			// Color the whole row green for successes
-			printRow(
-				green(method),
-				green(url),
-				green(status),
-				green(duration),
-				green(resultStr),
-				widths,
-			)
+			// Color the row content green for successes, but borders neutral
+			printRow(method, url, status, duration, resultStr, widths, green, neutral)
 		}
 
 		// If verbose and there's response body, print it under the row
 		if verbose && len(results[i].ResponseBody) > 0 && results[i].Error == nil {
-			fmt.Println("|" + strings.Repeat(" ", widths["METHOD"]+widths["URL"]+widths["STATUS"]+widths["DURATION"]+widths["RESULT"]+13) + "|")
+			responseWidth := widths["METHOD"] + widths["URL"] + widths["STATUS"] + widths["DURATION"] + widths["RESULT"] + 10
+			fmt.Print(neutral("| "))
+			fmt.Print(strings.Repeat(" ", responseWidth))
+			fmt.Println(neutral(" |"))
 
 			// Truncate response body if too long
 			responseBody := results[i].ResponseBody
-			maxBodyLen := widths["METHOD"] + widths["URL"] + widths["STATUS"] + widths["DURATION"] + widths["RESULT"] + 11
+			maxBodyLen := responseWidth - 11 // Account for "Response: "
 			if len(responseBody) > maxBodyLen {
 				responseBody = responseBody[:maxBodyLen-3] + "..."
 			}
 
-			fmt.Printf("| Response: %-*s |\n",
-				widths["METHOD"]+widths["URL"]+widths["STATUS"]+widths["DURATION"]+widths["RESULT"]+1,
-				responseBody)
+			fmt.Print(neutral("| "))
+			fmt.Printf("Response: %-*s", maxBodyLen, responseBody)
+			fmt.Println(neutral(" |"))
 		}
 	}
 
-	printDivider(widths)
+	printDivider(widths, neutral)
 
 	// Print statistics summary
 	total := successful + failed
@@ -401,7 +409,7 @@ func main() {
 	}
 
 	client := setupHTTPClient(config.Global.Timeout, flags.timeout)
-	green, red := setupColorOutput()
+	green, red, _ := setupColorOutput()
 
 	// Create a semaphore if concurrency is limited
 	var sem chan struct{}
