@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -76,6 +77,7 @@ type cliFlags struct {
 	timeout     int
 	verbosity   bool
 	concurrency int
+	jsonOutput  bool
 }
 
 // parseFlags parses command line flags
@@ -92,6 +94,9 @@ func parseFlags() cliFlags {
 	flag.BoolVar(&flags.verbosity, "v", false, "Enable verbose logging (shorthand)")
 
 	flag.IntVar(&flags.concurrency, "concurrency", 0, "Maximum number of concurrent requests (0 means unlimited)")
+
+	flag.BoolVar(&flags.jsonOutput, "json", false, "Output results in JSON format instead of table")
+	flag.BoolVar(&flags.jsonOutput, "j", false, "Output results in JSON format instead of table (shorthand)")
 
 	// Parse the flags
 	flag.Parse()
@@ -413,6 +418,97 @@ func printResults(results []EndpointResult, targetName string, green, red func(a
 	printDivider(widths, neutral)
 }
 
+// JSONResult represents a JSON-serializable version of EndpointResult
+type JSONResult struct {
+	URL          string  `json:"url"`
+	Method       string  `json:"method"`
+	StatusCode   int     `json:"status_code,omitempty"`
+	Duration     float64 `json:"duration_seconds"`
+	Success      bool    `json:"success"`
+	Error        string  `json:"error,omitempty"`
+	ResponseBody string  `json:"response_body,omitempty"`
+}
+
+// JSONTargetResults represents results for a single target in JSON format
+type JSONTargetResults struct {
+	Target  string       `json:"target"`
+	Results []JSONResult `json:"results"`
+	Summary JSONSummary  `json:"summary"`
+}
+
+// JSONSummary contains summary statistics for a target
+type JSONSummary struct {
+	Total       int     `json:"total"`
+	Successful  int     `json:"successful"`
+	Failed      int     `json:"failed"`
+	AvgDuration float64 `json:"avg_duration_seconds"`
+}
+
+// JSONOutput represents the complete JSON output format
+type JSONOutput struct {
+	Targets map[string]JSONTargetResults `json:"targets"`
+}
+
+// printJSONResults formats and prints the collected endpoint results as JSON
+func printJSONResults(results []EndpointResult, targetName string, verbose bool) (JSONTargetResults, error) {
+	var successful, failed int
+	var totalDuration time.Duration
+
+	// Convert to JSON-friendly format
+	jsonResults := make([]JSONResult, 0, len(results))
+	for _, result := range results {
+		jsonResult := JSONResult{
+			URL:      result.URL,
+			Method:   "GET",
+			Duration: result.Duration.Seconds(),
+			Success:  result.Success,
+		}
+
+		if result.Error != nil {
+			jsonResult.Error = result.Error.Error()
+			failed++
+		} else {
+			jsonResult.StatusCode = result.StatusCode
+			if result.Success {
+				successful++
+			} else {
+				failed++
+			}
+		}
+
+		// Include response body only in verbose mode
+		if verbose && len(result.ResponseBody) > 0 && result.Error == nil {
+			jsonResult.ResponseBody = result.ResponseBody
+		}
+
+		jsonResults = append(jsonResults, jsonResult)
+		totalDuration += result.Duration
+	}
+
+	// Create summary
+	total := successful + failed
+	var avgDuration float64
+	if total > 0 {
+		avgDuration = totalDuration.Seconds() / float64(total)
+	}
+
+	summary := JSONSummary{
+		Total:       total,
+		Successful:  successful,
+		Failed:      failed,
+		AvgDuration: avgDuration,
+	}
+
+	// Create target results
+	targetResults := JSONTargetResults{
+		Target:  targetName,
+		Results: jsonResults,
+		Summary: summary,
+	}
+
+	return targetResults, nil
+}
+
 func main() {
 	flags := parseFlags()
 	config, err := loadConfig(flags.configFile)
@@ -430,8 +526,13 @@ func main() {
 		sem = make(chan struct{}, flags.concurrency)
 	}
 
-	fmt.Println()
+	// Only print a newline in table mode
+	if !flags.jsonOutput {
+		fmt.Println()
+	}
+
 	// Process each target group
+	jsonOutput := JSONOutput{Targets: make(map[string]JSONTargetResults)}
 	for targetName, target := range config.Targets {
 		// Parse status ranges
 		var statusRanges []StatusRange
@@ -450,7 +551,25 @@ func main() {
 		}
 
 		results := processTarget(client, target, statusRanges, sem, flags.verbosity)
-		printResults(results, targetName, green, red, flags.verbosity)
-		fmt.Println()
+
+		if flags.jsonOutput {
+			jsonTargetResults, err := printJSONResults(results, targetName, flags.verbosity)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error printing JSON results: %s\n", err)
+			}
+			jsonOutput.Targets[targetName] = jsonTargetResults
+		} else {
+			printResults(results, targetName, green, red, flags.verbosity)
+			fmt.Println()
+		}
+	}
+
+	if flags.jsonOutput {
+		jsonData, err := json.MarshalIndent(jsonOutput, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling JSON output: %s\n", err)
+		} else {
+			fmt.Println(string(jsonData))
+		}
 	}
 }
