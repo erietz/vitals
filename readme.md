@@ -1,34 +1,50 @@
 # Vitals
 
-A flexible Go application for monitoring the health and status of API endpoints via HTTP GET requests.
+A Go application for monitoring HTTP endpoint health.
 
 ## Features
 
-- Run health checks for multiple API endpoints in parallel
-- Configure via TOML configuration file
-- Specify HTTP headers for authentication and other requirements
-- Define acceptable HTTP status codes and ranges
-- Color-coded output for easy readability
+- Concurrent health checks for HTTP endpoints
+- Multiple output formats: CLI table, JSON, HTML report
+- Configurable via one or more TOML files
+- HTTP header support for authentication
+- Custom status code validation (single codes or ranges)
+- Concurrency limiting
+- Response body inspection in verbose mode
+- Color-coded CLI output
 
 ## Requirements
 
-- Go 1.16 or higher
-- Dependencies:
-  - github.com/BurntSushi/toml
-  - github.com/fatih/color
+- Go 1.16+
+- Dependencies are managed via go modules
+
+## Usage
+
+```
+vitals [options] [config_file...]
+```
+
+### Options
+
+- `-c, --config`: Path to configuration file(s)
+- `-t, --timeout`: Override global timeout in seconds
+- `-v, --verbose`: Enable verbose logging and response body output
+- `--concurrency`: Limit concurrent requests (0 = unlimited)
+- `-j, --json`: Output results in JSON format
+- `-h, --html`: Output results in HTML format
+
+If no config file is specified, vitals looks for `vitals.toml` in the current directory.
 
 ## Configuration
 
-Create a TOML configuration file (default: `vitals.toml`) with your API endpoints and settings.
-
-### Configuration Format
+Create TOML configuration files with your API endpoints and settings.
 
 ```toml
-# Global configuration
+# Global settings
 [global]
-timeout = 5  # Maximum request timeout in seconds
+timeout = 5  # Request timeout in seconds
 
-# Target configurations
+# Target configuration
 [targets.example]
 name = "EXAMPLE API"
 base_urls = ["https://api.example.com"]
@@ -40,28 +56,13 @@ status_ranges = ["200-299"]
 
 ### Configuration Fields
 
-- `global`: Global settings
-  - `timeout`: Maximum time in seconds for each request (default: 5)
-  
+- `global.timeout`: Default request timeout in seconds
 - `targets`: Map of target configurations
-  - `name`: Display name for the target group
-  - `base_urls`: List of base URLs to check
-  - `endpoints`: List of endpoints to append to each base URL
-  - `headers`: Map of HTTP headers to include with each request
-  - `status_codes`: List of acceptable HTTP status codes
-  - `status_ranges`: List of acceptable HTTP status code ranges (e.g., "200-299")
+  - `name`: Display name
+  - `base_urls`: Base URLs to check
+  - `endpoints`: Endpoints to append to base URLs
+  - `headers`: HTTP headers for requests
+  - `status_codes`: Acceptable status codes
+  - `status_ranges`: Acceptable status code ranges
 
-If no status codes or ranges are specified, only HTTP 200 is accepted.
-
-## Usage
-
-```
-./vitals [config_file]
-```
-
-If `config_file` is not specified, the application will look for `vitals.toml` in the current directory.
-
-## Example Output
-
-
-Successful requests will be displayed in green, failed requests in red.
+If no status codes/ranges specified, only 200 is accepted.
