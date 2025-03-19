@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"slices"
@@ -623,56 +624,121 @@ func main() {
 	collectResults := flags.jsonOutput || flags.htmlOutput
 	jsonOutput := JSONOutput{Targets: make(map[string]JSONTargetResults)}
 
-	for _, configWithSource := range configs {
-		config := configWithSource.Config
-		configName := configWithSource.Filename
+	// Use mutex to safely access the shared jsonOutput map from multiple goroutines
+	var outputMutex sync.Mutex
+	var wg sync.WaitGroup
 
-		// Set up HTTP client with timeout from this config
-		client := setupHTTPClient(config.Global.Timeout, flags.timeout)
+	// Create a semaphore if concurrency is limited
+	var sem chan struct{}
+	if flags.concurrency > 0 {
+		sem = make(chan struct{}, flags.concurrency)
+	}
+
+	// Create a map to store results for table printing
+	tableResults := make(map[string]struct {
+		results    []EndpointResult
+		targetName string
+		configName string
+	})
+	var tableResultsMutex sync.Mutex
+
+	// Process all configs concurrently
+	for _, configWithSource := range configs {
+		wg.Add(1)
+
+		go func(configWithSource ConfigWithSource) {
+			defer wg.Done()
+
+			config := configWithSource.Config
+			configName := configWithSource.Filename
+
+			// Set up HTTP client with timeout from this config
+			client := setupHTTPClient(config.Global.Timeout, flags.timeout)
+
+			// Create a wait group for targets within this config
+			var targetWg sync.WaitGroup
+
+			// Process each target from this config file concurrently
+			for targetName, target := range config.Targets {
+				targetWg.Add(1)
+
+				// Launch a goroutine for each target
+				go func(targetName string, target TargetConfig, configName string, client *http.Client) {
+					defer targetWg.Done()
+
+					// Create a unique key for this target in this config file
+					uniqueTargetKey := fmt.Sprintf("%s::%s", configName, targetName)
+
+					// Parse status ranges
+					var statusRanges []StatusRange
+					for _, rangeStr := range target.StatusRanges {
+						r, err := parseStatusRange(rangeStr)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "Error parsing status range '%s': %s\n", rangeStr, err)
+							continue
+						}
+						statusRanges = append(statusRanges, r)
+					}
+
+					// Default to 200 if no status codes or ranges specified
+					if len(target.StatusCodes) == 0 && len(statusRanges) == 0 {
+						target.StatusCodes = []int{200}
+					}
+
+					results := processTarget(client, target, statusRanges, sem, flags.verbosity)
+
+					if collectResults {
+						jsonTargetResults, err := printJSONResults(results, targetName, configName, flags.verbosity)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "Error processing results: %s\n", err)
+						}
+
+						// Safely update the shared map
+						outputMutex.Lock()
+						jsonOutput.Targets[uniqueTargetKey] = jsonTargetResults
+						outputMutex.Unlock()
+					}
+
+					// Store results for table output
+					if !flags.jsonOutput && !flags.htmlOutput {
+						tableResultsMutex.Lock()
+						tableResults[uniqueTargetKey] = struct {
+							results    []EndpointResult
+							targetName string
+							configName string
+						}{
+							results:    results,
+							targetName: targetName,
+							configName: configName,
+						}
+						tableResultsMutex.Unlock()
+					}
+				}(targetName, target, configName, client)
+			}
+
+			// Wait for all targets in this config to complete
+			targetWg.Wait()
+		}(configWithSource)
+	}
+
+	// Wait for all config processing to complete
+	wg.Wait()
+
+	// Print table results after all processing is complete
+	if !flags.jsonOutput && !flags.htmlOutput {
 		green, red, _ := setupColorOutput()
 
-		// Create a semaphore if concurrency is limited
-		var sem chan struct{}
-		if flags.concurrency > 0 {
-			sem = make(chan struct{}, flags.concurrency)
+		// Sort keys for consistent output order
+		keys := make([]string, 0, len(tableResults))
+		for k := range tableResults {
+			keys = append(keys, k)
 		}
+		slices.Sort(keys)
 
-		// Process each target from this config file
-		for targetName, target := range config.Targets {
-			// Create a unique key for this target in this config file
-			uniqueTargetKey := fmt.Sprintf("%s::%s", configName, targetName)
-
-			// Parse status ranges
-			var statusRanges []StatusRange
-			for _, rangeStr := range target.StatusRanges {
-				r, err := parseStatusRange(rangeStr)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error parsing status range '%s': %s\n", rangeStr, err)
-					continue
-				}
-				statusRanges = append(statusRanges, r)
-			}
-
-			// Default to 200 if no status codes or ranges specified
-			if len(target.StatusCodes) == 0 && len(statusRanges) == 0 {
-				target.StatusCodes = []int{200}
-			}
-
-			results := processTarget(client, target, statusRanges, sem, flags.verbosity)
-
-			if collectResults {
-				jsonTargetResults, err := printJSONResults(results, targetName, configName, flags.verbosity)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error processing results: %s\n", err)
-				}
-				jsonOutput.Targets[uniqueTargetKey] = jsonTargetResults
-			}
-
-			// Only print table output if neither JSON nor HTML is requested
-			if !flags.jsonOutput && !flags.htmlOutput {
-				printResults(results, targetName, configName, green, red, flags.verbosity)
-				fmt.Println()
-			}
+		for _, key := range keys {
+			result := tableResults[key]
+			printResults(result.results, result.targetName, result.configName, green, red, flags.verbosity)
+			fmt.Println()
 		}
 	}
 
