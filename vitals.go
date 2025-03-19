@@ -19,7 +19,20 @@ import (
 	"github.com/fatih/color"
 )
 
+// stringSlice is a custom type that implements flag.Value interface for string slices
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, ", ")
+}
+
+func (s *stringSlice) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
 // Embed the templates directory
+//
 //go:embed templates/*
 var templateFS embed.FS
 
@@ -79,7 +92,7 @@ func isStatusAcceptable(status int, codes []int, ranges []StatusRange) bool {
 
 // Define CLI flags
 type cliFlags struct {
-	configFile  string
+	configFiles []string
 	timeout     int
 	verbosity   bool
 	concurrency int
@@ -91,8 +104,9 @@ type cliFlags struct {
 func parseFlags() cliFlags {
 	flags := cliFlags{}
 
-	flag.StringVar(&flags.configFile, "config", "vitals.toml", "Path to the configuration file")
-	flag.StringVar(&flags.configFile, "c", "vitals.toml", "Path to the configuration file (shorthand)")
+	// Define a string slice flag for config files
+	flag.Var((*stringSlice)(&flags.configFiles), "config", "Path to configuration file(s)")
+	flag.Var((*stringSlice)(&flags.configFiles), "c", "Path to configuration file(s) (shorthand)")
 
 	flag.IntVar(&flags.timeout, "timeout", 0, "Override the global timeout in seconds")
 	flag.IntVar(&flags.timeout, "t", 0, "Override the global timeout in seconds (shorthand)")
@@ -111,16 +125,127 @@ func parseFlags() cliFlags {
 	// Parse the flags
 	flag.Parse()
 
+	// If no config files specified, use the default
+	if len(flags.configFiles) == 0 {
+		flags.configFiles = append(flags.configFiles, "vitals.toml")
+	}
+
 	return flags
 }
 
-// loadConfig loads and validates the configuration file
+// loadConfig loads and validates a single configuration file
 func loadConfig(configFile string) (Config, error) {
 	var config Config
 	if _, err := toml.DecodeFile(configFile, &config); err != nil {
-		return Config{}, fmt.Errorf("error reading config file: %s", err)
+		return Config{}, fmt.Errorf("error reading config file %s: %s", configFile, err)
 	}
 	return config, nil
+}
+
+// loadConfigFiles loads multiple configuration files but keeps targets separate with their source filenames
+func loadConfigFiles(configFiles []string) ([]ConfigWithSource, error) {
+	if len(configFiles) == 0 {
+		return nil, fmt.Errorf("no config files specified")
+	}
+
+	configsWithSource := make([]ConfigWithSource, 0, len(configFiles))
+
+	// Load each config file separately
+	for _, configFile := range configFiles {
+		config, err := loadConfig(configFile)
+		if err != nil {
+			return nil, err
+		}
+
+		// Store config with its source filename
+		configsWithSource = append(configsWithSource, ConfigWithSource{
+			Config:   config,
+			Filename: configFile,
+		})
+	}
+
+	return configsWithSource, nil
+}
+
+// ConfigWithSource holds a configuration along with the source filename
+type ConfigWithSource struct {
+	Config   Config
+	Filename string
+}
+
+// mergeConfigs merges two Config objects, with values from the second one taking precedence
+func mergeConfigs(base, override Config) Config {
+	result := base
+
+	// If the override has a non-zero timeout, use that
+	if override.Global.Timeout > 0 {
+		result.Global.Timeout = override.Global.Timeout
+	}
+
+	// Merge targets - add new ones and merge existing ones
+	if result.Targets == nil {
+		result.Targets = make(map[string]TargetConfig)
+	}
+
+	for name, target := range override.Targets {
+		if existingTarget, exists := result.Targets[name]; exists {
+			// Merge existing target
+			result.Targets[name] = mergeTargetConfigs(existingTarget, target)
+		} else {
+			// Add new target
+			result.Targets[name] = target
+		}
+	}
+
+	return result
+}
+
+// mergeTargetConfigs merges two TargetConfig objects
+func mergeTargetConfigs(base, override TargetConfig) TargetConfig {
+	result := base
+
+	// Use override name if specified
+	if override.Name != "" {
+		result.Name = override.Name
+	}
+
+	// Add new base URLs
+	for _, baseURL := range override.BaseURLs {
+		if !slices.Contains(result.BaseURLs, baseURL) {
+			result.BaseURLs = append(result.BaseURLs, baseURL)
+		}
+	}
+
+	// Add new endpoints
+	for _, endpoint := range override.Endpoints {
+		if !slices.Contains(result.Endpoints, endpoint) {
+			result.Endpoints = append(result.Endpoints, endpoint)
+		}
+	}
+
+	// Merge headers
+	if result.Headers == nil {
+		result.Headers = make(map[string]string)
+	}
+	for key, value := range override.Headers {
+		result.Headers[key] = value
+	}
+
+	// Add new status codes
+	for _, code := range override.StatusCodes {
+		if !slices.Contains(result.StatusCodes, code) {
+			result.StatusCodes = append(result.StatusCodes, code)
+		}
+	}
+
+	// Add new status ranges
+	for _, rangeStr := range override.StatusRanges {
+		if !slices.Contains(result.StatusRanges, rangeStr) {
+			result.StatusRanges = append(result.StatusRanges, rangeStr)
+		}
+	}
+
+	return result
 }
 
 // setupHTTPClient creates an HTTP client with the specified timeout
@@ -283,7 +408,7 @@ func printRow(method, url string, status interface{}, duration, result string, w
 }
 
 // printResults formats and prints the collected endpoint results in a table
-func printResults(results []EndpointResult, targetName string, green, red func(a ...interface{}) string, verbose bool) {
+func printResults(results []EndpointResult, targetName string, configName string, green, red func(a ...interface{}) string, verbose bool) {
 	var successful, failed int
 	var totalDuration time.Duration
 
@@ -355,12 +480,18 @@ func printResults(results []EndpointResult, targetName string, green, red func(a
 		totalWidth += widths[width] + 3 // width + 2 for padding + 1 for border
 	}
 
+	// Construct the title with target and config file names
+	title := fmt.Sprintf("[%s] from %s", targetName, configName)
+
 	// Print title row with target name centered first
 	titleDivider := "+" + strings.Repeat("-", totalWidth-2) + "+"
 	fmt.Println(neutral(titleDivider))
-	padding := (totalWidth - 2 - len(targetName)) / 2
-	titleRow := "|" + strings.Repeat(" ", padding) + targetName
-	titleRow += strings.Repeat(" ", totalWidth-2-padding-len(targetName)) + "|"
+	padding := (totalWidth - 2 - len(title)) / 2
+	if padding < 0 {
+		padding = 1
+	}
+	titleRow := "|" + strings.Repeat(" ", padding) + title
+	titleRow += strings.Repeat(" ", totalWidth-2-padding-len(title)) + "|"
 	fmt.Println(neutral(titleRow))
 	fmt.Println(neutral(titleDivider))
 
@@ -441,9 +572,10 @@ type JSONResult struct {
 
 // JSONTargetResults represents results for a single target in JSON format
 type JSONTargetResults struct {
-	Target  string       `json:"target"`
-	Results []JSONResult `json:"results"`
-	Summary JSONSummary  `json:"summary"`
+	Target     string       `json:"target"`
+	ConfigFile string       `json:"config_file"` // Added config file name
+	Results    []JSONResult `json:"results"`
+	Summary    JSONSummary  `json:"summary"`
 }
 
 // JSONSummary contains summary statistics for a target
@@ -466,7 +598,7 @@ type HTMLTemplateData struct {
 }
 
 // printJSONResults formats and prints the collected endpoint results as JSON
-func printJSONResults(results []EndpointResult, targetName string, verbose bool) (JSONTargetResults, error) {
+func printJSONResults(results []EndpointResult, targetName string, configName string, verbose bool) (JSONTargetResults, error) {
 	var successful, failed int
 	var totalDuration time.Duration
 
@@ -517,9 +649,10 @@ func printJSONResults(results []EndpointResult, targetName string, verbose bool)
 
 	// Create target results
 	targetResults := JSONTargetResults{
-		Target:  targetName,
-		Results: jsonResults,
-		Summary: summary,
+		Target:     targetName,
+		ConfigFile: configName, // Include config file name
+		Results:    jsonResults,
+		Summary:    summary,
 	}
 
 	return targetResults, nil
@@ -532,37 +665,28 @@ func generateHTMLResults(allTargets map[string]JSONTargetResults, verbose bool) 
 		Targets: allTargets,
 		Verbose: verbose,
 	}
-	
+
 	// Parse the template from embedded file
 	tmpl, err := template.ParseFS(templateFS, "templates/report.html")
 	if err != nil {
 		return "", fmt.Errorf("error parsing HTML template: %v", err)
 	}
-	
+
 	// Render the template to a string
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("error executing HTML template: %v", err)
 	}
-	
+
 	return buf.String(), nil
 }
 
 func main() {
 	flags := parseFlags()
-	config, err := loadConfig(flags.configFile)
+	configs, err := loadConfigFiles(flags.configFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(1)
-	}
-
-	client := setupHTTPClient(config.Global.Timeout, flags.timeout)
-	green, red, _ := setupColorOutput()
-
-	// Create a semaphore if concurrency is limited
-	var sem chan struct{}
-	if flags.concurrency > 0 {
-		sem = make(chan struct{}, flags.concurrency)
 	}
 
 	// Only print a newline in table mode
@@ -574,38 +698,56 @@ func main() {
 	collectResults := flags.jsonOutput || flags.htmlOutput
 	jsonOutput := JSONOutput{Targets: make(map[string]JSONTargetResults)}
 
-	// Process each target group
-	for targetName, target := range config.Targets {
-		// Parse status ranges
-		var statusRanges []StatusRange
-		for _, rangeStr := range target.StatusRanges {
-			r, err := parseStatusRange(rangeStr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing status range '%s': %s\n", rangeStr, err)
-				continue
+	for _, configWithSource := range configs {
+		config := configWithSource.Config
+		configName := configWithSource.Filename
+
+		// Set up HTTP client with timeout from this config
+		client := setupHTTPClient(config.Global.Timeout, flags.timeout)
+		green, red, _ := setupColorOutput()
+
+		// Create a semaphore if concurrency is limited
+		var sem chan struct{}
+		if flags.concurrency > 0 {
+			sem = make(chan struct{}, flags.concurrency)
+		}
+
+		// Process each target from this config file
+		for targetName, target := range config.Targets {
+			// Create a unique key for this target in this config file
+			uniqueTargetKey := fmt.Sprintf("%s::%s", configName, targetName)
+
+			// Parse status ranges
+			var statusRanges []StatusRange
+			for _, rangeStr := range target.StatusRanges {
+				r, err := parseStatusRange(rangeStr)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error parsing status range '%s': %s\n", rangeStr, err)
+					continue
+				}
+				statusRanges = append(statusRanges, r)
 			}
-			statusRanges = append(statusRanges, r)
-		}
 
-		// Default to 200 if no status codes or ranges specified
-		if len(target.StatusCodes) == 0 && len(statusRanges) == 0 {
-			target.StatusCodes = []int{200}
-		}
-
-		results := processTarget(client, target, statusRanges, sem, flags.verbosity)
-
-		if collectResults {
-			jsonTargetResults, err := printJSONResults(results, targetName, flags.verbosity)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error processing results: %s\n", err)
+			// Default to 200 if no status codes or ranges specified
+			if len(target.StatusCodes) == 0 && len(statusRanges) == 0 {
+				target.StatusCodes = []int{200}
 			}
-			jsonOutput.Targets[targetName] = jsonTargetResults
-		}
 
-		// Only print table output if neither JSON nor HTML is requested
-		if !flags.jsonOutput && !flags.htmlOutput {
-			printResults(results, targetName, green, red, flags.verbosity)
-			fmt.Println()
+			results := processTarget(client, target, statusRanges, sem, flags.verbosity)
+
+			if collectResults {
+				jsonTargetResults, err := printJSONResults(results, targetName, configName, flags.verbosity)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error processing results: %s\n", err)
+				}
+				jsonOutput.Targets[uniqueTargetKey] = jsonTargetResults
+			}
+
+			// Only print table output if neither JSON nor HTML is requested
+			if !flags.jsonOutput && !flags.htmlOutput {
+				printResults(results, targetName, configName, green, red, flags.verbosity)
+				fmt.Println()
+			}
 		}
 	}
 
