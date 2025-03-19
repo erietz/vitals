@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"slices"
+
 	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
-	"slices"
 )
 
 // Config represents the top-level configuration structure
@@ -267,7 +268,7 @@ func printRow(method, url string, status interface{}, duration, result string, w
 }
 
 // printResults formats and prints the collected endpoint results in a table
-func printResults(results []EndpointResult, green, red func(a ...interface{}) string, verbose bool) {
+func printResults(results []EndpointResult, targetName string, green, red func(a ...interface{}) string, verbose bool) {
 	var successful, failed int
 	var totalDuration time.Duration
 
@@ -333,8 +334,22 @@ func printResults(results []EndpointResult, green, red func(a ...interface{}) st
 		totalDuration += result.Duration
 	}
 
-	// Print table header
-	printDivider(widths, neutral)
+	// Calculate table width for title row
+	totalWidth := 1 // Initial "+" character
+	for _, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+		totalWidth += widths[width] + 3 // width + 2 for padding + 1 for border
+	}
+
+	// Print title row with target name centered first
+	titleDivider := "+" + strings.Repeat("-", totalWidth-2) + "+"
+	fmt.Println(neutral(titleDivider))
+	padding := (totalWidth - 2 - len(targetName)) / 2
+	titleRow := "|" + strings.Repeat(" ", padding) + targetName
+	titleRow += strings.Repeat(" ", totalWidth-2-padding-len(targetName)) + "|"
+	fmt.Println(neutral(titleRow))
+	fmt.Println(neutral(titleDivider))
+
+	// Print table header AFTER the title row
 	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths, neutral, neutral)
 	printDivider(widths, neutral)
 
@@ -377,16 +392,25 @@ func printResults(results []EndpointResult, green, red func(a ...interface{}) st
 		}
 	}
 
-	printDivider(widths, neutral)
-
-	// Print statistics summary
+	// Print summary statistics row
 	total := successful + failed
 	if total > 0 {
+		printDivider(widths, neutral)
 		avgDuration := totalDuration / time.Duration(total)
-		fmt.Println("\nSummary:")
-		fmt.Printf("Total: %d, Successful: %d, Failed: %d\n", total, successful, failed)
-		fmt.Printf("Average response time: %.2fs\n", avgDuration.Seconds())
+		summaryStr := fmt.Sprintf("Total: %d, Success: %d, Failed: %d, Avg: %.2fs",
+			total, successful, failed, avgDuration.Seconds())
+
+		// Create a single row for the summary that spans all columns
+		fmt.Print(neutral("| "))
+		if failed > 0 {
+			fmt.Print(red(fmt.Sprintf("%-*s", totalWidth-4, summaryStr)))
+		} else {
+			fmt.Print(green(fmt.Sprintf("%-*s", totalWidth-4, summaryStr)))
+		}
+		fmt.Println(neutral(" |"))
 	}
+
+	printDivider(widths, neutral)
 }
 
 func main() {
@@ -406,12 +430,9 @@ func main() {
 		sem = make(chan struct{}, flags.concurrency)
 	}
 
+	fmt.Println()
 	// Process each target group
 	for targetName, target := range config.Targets {
-		fmt.Println("--------------------------------------------------------------------------")
-		fmt.Printf("%s\n", targetName)
-		fmt.Println("--------------------------------------------------------------------------")
-
 		// Parse status ranges
 		var statusRanges []StatusRange
 		for _, rangeStr := range target.StatusRanges {
@@ -429,6 +450,7 @@ func main() {
 		}
 
 		results := processTarget(client, target, statusRanges, sem, flags.verbosity)
-		printResults(results, green, red, flags.verbosity)
+		printResults(results, targetName, green, red, flags.verbosity)
+		fmt.Println()
 	}
 }
