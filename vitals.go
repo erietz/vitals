@@ -2,6 +2,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +18,10 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
 )
+
+// Embed the templates directory
+//go:embed templates/*
+var templateFS embed.FS
 
 // Config represents the top-level configuration structure
 type Config struct {
@@ -455,6 +459,12 @@ type JSONOutput struct {
 	Targets map[string]JSONTargetResults `json:"targets"`
 }
 
+// HTMLTemplateData represents the data passed to the HTML template
+type HTMLTemplateData struct {
+	Targets map[string]JSONTargetResults
+	Verbose bool
+}
+
 // printJSONResults formats and prints the collected endpoint results as JSON
 func printJSONResults(results []EndpointResult, targetName string, verbose bool) (JSONTargetResults, error) {
 	var successful, failed int
@@ -515,190 +525,27 @@ func printJSONResults(results []EndpointResult, targetName string, verbose bool)
 	return targetResults, nil
 }
 
-// generateHTMLResults formats the endpoint results into HTML
-func generateHTMLResults(allTargets map[string]JSONTargetResults, verbose bool) string {
-	html := `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Vitals Health Check</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      line-height: 1.6;
-      color: #333;
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    h1 {
-      text-align: center;
-      margin-bottom: 30px;
-    }
-    .target {
-      margin-bottom: 40px;
-      border: 1px solid #ddd;
-      border-radius: 5px;
-      overflow: hidden;
-    }
-    .target-header {
-      background: #f5f5f5;
-      padding: 10px 15px;
-      border-bottom: 1px solid #ddd;
-      font-size: 1.2rem;
-      font-weight: bold;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    th {
-      background-color: #f0f0f0;
-      text-align: left;
-      padding: 8px 12px;
-      border-bottom: 2px solid #ddd;
-    }
-    td {
-      padding: 8px 12px;
-      border-bottom: 1px solid #eee;
-    }
-    tr:nth-child(even) {
-      background-color: #f9f9f9;
-    }
-    .success {
-      background-color: #dff0d8;
-      color: #3c763d;
-    }
-    .failure {
-      background-color: #f2dede;
-      color: #a94442;
-    }
-    .summary {
-      margin-top: 10px;
-      padding: 10px 15px;
-      background-color: #f5f5f5;
-      border-top: 1px solid #ddd;
-      font-weight: bold;
-    }
-    .response-body {
-      font-family: monospace;
-      white-space: pre-wrap;
-      background-color: #f8f8f8;
-      border: 1px solid #ddd;
-      padding: 10px;
-      margin: 5px 0;
-      border-radius: 3px;
-      max-height: 200px;
-      overflow: auto;
-    }
-    .details-toggle {
-      cursor: pointer;
-      color: #337ab7;
-      margin-left: 10px;
-    }
-  </style>
-  <script>
-    function toggleDetails(id) {
-      const details = document.getElementById(id);
-      if (details.style.display === 'none' || !details.style.display) {
-        details.style.display = 'block';
-      } else {
-        details.style.display = 'none';
-      }
-    }
-  </script>
-</head>
-<body>
-  <h1>Vitals Health Check Report</h1>`
-
-	// Sort target names for consistent output order
-	targetNames := make([]string, 0, len(allTargets))
-	for name := range allTargets {
-		targetNames = append(targetNames, name)
+// generateHTMLResults formats the endpoint results into HTML using the embedded template
+func generateHTMLResults(allTargets map[string]JSONTargetResults, verbose bool) (string, error) {
+	// Create template data
+	data := HTMLTemplateData{
+		Targets: allTargets,
+		Verbose: verbose,
 	}
-	sort.Strings(targetNames)
-
-	// Process each target
-	for _, targetName := range targetNames {
-		target := allTargets[targetName]
-		html += fmt.Sprintf(`
-  <div class="target">
-    <div class="target-header">%s</div>
-    <table>
-      <thead>
-        <tr>
-          <th>Method</th>
-          <th>URL</th>
-          <th>Status</th>
-          <th>Duration</th>
-          <th>Result</th>
-        </tr>
-      </thead>
-      <tbody>`, target.Target)
-
-		// Process each result
-		for i, result := range target.Results {
-			var status, resultStr string
-			var rowClass string
-
-			if result.Error != "" {
-				status = "ERROR"
-				resultStr = fmt.Sprintf("Error: %s", result.Error)
-				rowClass = "failure"
-			} else {
-				status = fmt.Sprintf("%d", result.StatusCode)
-				if result.Success {
-					resultStr = "Success"
-					rowClass = "success"
-				} else {
-					resultStr = "Failed"
-					rowClass = "failure"
-				}
-			}
-
-			html += fmt.Sprintf(`
-        <tr class="%s">
-          <td>%s</td>
-          <td>%s</td>
-          <td>%s</td>
-          <td>%.2fs</td>
-          <td>%s`,
-				rowClass, result.Method, result.URL, status, result.Duration, resultStr)
-
-			// Add response body toggle if in verbose mode and there's a response
-			if verbose && result.ResponseBody != "" {
-				detailID := fmt.Sprintf("details-%s-%d", target.Target, i)
-				html += fmt.Sprintf(`
-              <span class="details-toggle" onclick="toggleDetails('%s')">[View Response]</span>
-              <div id="%s" class="response-body" style="display:none">%s</div>`,
-					detailID, detailID, template.HTMLEscapeString(result.ResponseBody))
-			}
-
-			html += `
-          </td>
-        </tr>`
-		}
-
-		// Add summary section
-		html += fmt.Sprintf(`
-      </tbody>
-    </table>
-    <div class="summary">
-      Total: %d, Success: %d, Failed: %d, Avg Duration: %.2fs
-    </div>
-  </div>`,
-			target.Summary.Total,
-			target.Summary.Successful,
-			target.Summary.Failed,
-			target.Summary.AvgDuration)
+	
+	// Parse the template from embedded file
+	tmpl, err := template.ParseFS(templateFS, "templates/report.html")
+	if err != nil {
+		return "", fmt.Errorf("error parsing HTML template: %v", err)
 	}
-
-	html += `
-</body>
-</html>`
-
-	return html
+	
+	// Render the template to a string
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("error executing HTML template: %v", err)
+	}
+	
+	return buf.String(), nil
 }
 
 func main() {
@@ -771,7 +618,11 @@ func main() {
 			fmt.Println(string(jsonData))
 		}
 	} else if flags.htmlOutput {
-		htmlOutput := generateHTMLResults(jsonOutput.Targets, flags.verbosity)
+		htmlOutput, err := generateHTMLResults(jsonOutput.Targets, flags.verbosity)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating HTML output: %s\n", err)
+			os.Exit(1)
+		}
 		fmt.Println(htmlOutput)
 	}
 }
