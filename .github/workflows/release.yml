@@ -1,0 +1,60 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags
+
+permissions:
+  contents: write # Needed for creating releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '>=1.21.0'
+
+      - name: Build for all platforms
+        run: |
+          platforms=("windows/amd64" "windows/386" "darwin/amd64" "darwin/arm64" "linux/amd64" "linux/386" "linux/arm64" "linux/arm")
+          for platform in "${platforms[@]}"; do
+            OS="${platform%/*}"
+            ARCH="${platform#*/}"
+            output_name="vitals"
+            if [ "$OS" = "windows" ]; then
+              output_name="vitals.exe"
+            fi
+            echo "Building for $OS/$ARCH..."
+            GOOS=$OS GOARCH=$ARCH go build -o "dist/vitals_${OS}_${ARCH}/$output_name" .
+            # Create archive
+            cd dist
+            if [ "$OS" = "windows" ]; then
+              zip -r "vitals_${OS}_${ARCH}.zip" "vitals_${OS}_${ARCH}"
+            else
+              tar -czf "vitals_${OS}_${ARCH}.tar.gz" "vitals_${OS}_${ARCH}"
+            fi
+            cd ..
+          done
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: false
+          files: |
+            dist/vitals_windows_amd64.zip
+            dist/vitals_windows_386.zip
+            dist/vitals_darwin_amd64.tar.gz
+            dist/vitals_darwin_arm64.tar.gz
+            dist/vitals_linux_amd64.tar.gz
+            dist/vitals_linux_386.tar.gz
+            dist/vitals_linux_arm64.tar.gz
+            dist/vitals_linux_arm.tar.gz
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
