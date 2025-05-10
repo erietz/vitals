@@ -302,9 +302,16 @@ func constructURL(baseURL, endpoint string) string {
 
 // printDivider prints a horizontal divider line for the table
 func printDivider(widths map[string]int, neutral func(a ...interface{}) string) {
-	divider := "+"
-	for _, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
-		divider += strings.Repeat("-", widths[width]+2) + "+"
+	divider := "┌"
+	columnNames := []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"}
+	
+	for i, width := range columnNames {
+		divider += strings.Repeat("─", widths[width]+2)
+		if i < len(columnNames)-1 {
+			divider += "┬"
+		} else {
+			divider += "┐"
+		}
 	}
 	fmt.Println(neutral(divider))
 }
@@ -322,14 +329,15 @@ func printRow(method, url string, status interface{}, duration, result string, w
 
 	// Build colored row with neutral borders
 	var coloredRow string
-	coloredRow += neutral("|")
+	coloredRow += neutral("│")
 
 	for i, part := range parts {
-		coloredRow += rowColor(part) + neutral("|")
+		coloredRow += rowColor(part)
 		if i < len(parts)-1 {
-			// No need to add extra pipe after last part
+			coloredRow += neutral("│")
 		}
 	}
+	coloredRow += neutral("│")
 
 	fmt.Println(coloredRow)
 }
@@ -427,20 +435,31 @@ func printResults(results []EndpointResult, targetName string, configName string
 	title := fmt.Sprintf("[%s] from %s", targetName, configName)
 
 	// Print title row with target name centered first
-	titleDivider := "+" + strings.Repeat("-", totalWidth-2) + "+"
+	titleDivider := "┌" + strings.Repeat("─", totalWidth-2) + "┐"
 	fmt.Println(neutral(titleDivider))
 	padding := (totalWidth - 2 - len(title)) / 2
 	if padding < 0 {
 		padding = 1
 	}
-	titleRow := "|" + strings.Repeat(" ", padding) + title
-	titleRow += strings.Repeat(" ", totalWidth-2-padding-len(title)) + "|"
+	titleRow := "│" + strings.Repeat(" ", padding) + title
+	titleRow += strings.Repeat(" ", totalWidth-2-padding-len(title)) + "│"
 	fmt.Println(neutral(titleRow))
-	fmt.Println(neutral(titleDivider))
+	fmt.Println(neutral("├" + strings.Repeat("─", totalWidth-2) + "┤"))
 
 	// Print table header AFTER the title row
 	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths, neutral, neutral)
-	printDivider(widths, neutral)
+	
+	// Update the header divider to use proper box drawing characters
+	headerDivider := "├"
+	for i, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+		headerDivider += strings.Repeat("─", widths[width]+2)
+		if i < 4 {
+			headerDivider += "┼"
+		} else {
+			headerDivider += "┤"
+		}
+	}
+	fmt.Println(neutral(headerDivider))
 
 	// Print table rows
 	for i, row := range tableData {
@@ -465,9 +484,9 @@ func printResults(results []EndpointResult, targetName string, configName string
 		// If verbose and there's response body, print it under the row
 		if verbose && len(results[i].ResponseBody) > 0 && results[i].Error == nil {
 			responseWidth := totalWidth - 4 // Account for borders and spacing
-			fmt.Print(neutral("| "))
+			fmt.Print(neutral("│ "))
 			fmt.Print(strings.Repeat(" ", responseWidth))
-			fmt.Println(neutral(" |"))
+			fmt.Println(neutral(" │"))
 
 			// Truncate response body if too long
 			responseBody := results[i].ResponseBody
@@ -476,31 +495,44 @@ func printResults(results []EndpointResult, targetName string, configName string
 				responseBody = responseBody[:maxBodyLen-3] + "..."
 			}
 
-			fmt.Print(neutral("| "))
+			fmt.Print(neutral("│ "))
 			fmt.Printf("Response: %-*s", maxBodyLen, responseBody)
-			fmt.Println(neutral(" |"))
+			fmt.Println(neutral(" │"))
 		}
 	}
 
 	// Print summary statistics row
 	total := successful + failed
 	if total > 0 {
-		printDivider(widths, neutral)
+		// Use a proper divider for the summary section
+		summaryDivider := "├"
+		for i, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+			summaryDivider += strings.Repeat("─", widths[width]+2)
+			if i < 4 {
+				summaryDivider += "┴"
+			} else {
+				summaryDivider += "┤"
+			}
+		}
+		fmt.Println(neutral(summaryDivider))
+		
 		avgDuration := totalDuration / time.Duration(total)
 		summaryStr := fmt.Sprintf("Total: %d, Success: %d, Failed: %d, Avg: %.2fs",
 			total, successful, failed, avgDuration.Seconds())
 
 		// Create a single row for the summary that spans all columns
-		fmt.Print(neutral("| "))
+		fmt.Print(neutral("│ "))
 		if failed > 0 {
 			fmt.Print(red(fmt.Sprintf("%-*s", totalWidth-4, summaryStr)))
 		} else {
 			fmt.Print(green(fmt.Sprintf("%-*s", totalWidth-4, summaryStr)))
 		}
-		fmt.Println(neutral(" |"))
+		fmt.Println(neutral(" │"))
 	}
 
-	printDivider(widths, neutral)
+	// Create the final border with proper box-drawing characters
+	finalDivider := "└" + strings.Repeat("─", totalWidth-2) + "┘"
+	fmt.Println(neutral(finalDivider))
 }
 
 // JSONResult represents a JSON-serializable version of EndpointResult
