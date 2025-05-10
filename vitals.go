@@ -18,6 +18,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
+	"golang.org/x/term"
 )
 
 // stringSlice is a custom type that implements flag.Value interface for string slices
@@ -381,10 +382,6 @@ func printResults(results []EndpointResult, targetName string, configName string
 		if len(urlStr) > widths["URL"] {
 			widths["URL"] = len(urlStr)
 		}
-		// Limit URL length if it's too long
-		if widths["URL"] > 60 {
-			widths["URL"] = 60
-		}
 		statusLen := len(fmt.Sprintf("%v", status))
 		if statusLen > widths["STATUS"] {
 			widths["STATUS"] = statusLen
@@ -400,7 +397,27 @@ func printResults(results []EndpointResult, targetName string, configName string
 		totalDuration += result.Duration
 	}
 
-	// Calculate table width for title row
+	// Get terminal width
+	terminalWidth := getTerminalWidth()
+
+	// Calculate total minimum width needed (including borders)
+	baseWidth := 1 // Initial "+" character
+	for _, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+		minWidth := len(width)
+		if widths[width] < minWidth {
+			widths[width] = minWidth
+		}
+		baseWidth += widths[width] + 3 // width + 2 for padding + 1 for border
+	}
+
+	// If we have more space, allocate it to the URL column
+	extraWidth := terminalWidth - baseWidth
+	if extraWidth > 0 {
+		// Add the extra width to the URL column, as it's the most likely to need more space
+		widths["URL"] += extraWidth
+	}
+
+	// Recalculate total width after adjustments
 	totalWidth := 1 // Initial "+" character
 	for _, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
 		totalWidth += widths[width] + 3 // width + 2 for padding + 1 for border
@@ -429,8 +446,9 @@ func printResults(results []EndpointResult, targetName string, configName string
 	for i, row := range tableData {
 		method := row[0]
 		url := row[1]
-		if len(url) > 60 {
-			url = url[:57] + "..."
+		// Truncate URL if it's too long for the column
+		if len(url) > widths["URL"] {
+			url = url[:widths["URL"]-3] + "..."
 		}
 		status := row[2]
 		duration := row[3]
@@ -446,7 +464,7 @@ func printResults(results []EndpointResult, targetName string, configName string
 
 		// If verbose and there's response body, print it under the row
 		if verbose && len(results[i].ResponseBody) > 0 && results[i].Error == nil {
-			responseWidth := widths["METHOD"] + widths["URL"] + widths["STATUS"] + widths["DURATION"] + widths["RESULT"] + 10
+			responseWidth := totalWidth - 4 // Account for borders and spacing
 			fmt.Print(neutral("| "))
 			fmt.Print(strings.Repeat(" ", responseWidth))
 			fmt.Println(neutral(" |"))
@@ -605,6 +623,15 @@ func generateHTMLResults(allTargets map[string]JSONTargetResults, verbose bool) 
 	}
 
 	return buf.String(), nil
+}
+
+// getTerminalWidth returns the width of the terminal or a default value if it can't be determined
+func getTerminalWidth() int {
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width <= 0 {
+		return 80 // Default width if we can't determine the actual terminal width
+	}
+	return width
 }
 
 func main() {
