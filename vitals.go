@@ -304,7 +304,7 @@ func constructURL(baseURL, endpoint string) string {
 func printDivider(widths map[string]int, neutral func(a ...interface{}) string) {
 	divider := "┌"
 	columnNames := []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"}
-	
+
 	for i, width := range columnNames {
 		divider += strings.Repeat("─", widths[width]+2)
 		if i < len(columnNames)-1 {
@@ -406,35 +406,35 @@ func printResults(results []EndpointResult, targetName string, configName string
 	}
 
 	// Get terminal width
-	terminalWidth := getTerminalWidth()
+	terminalWidth := getTerminalWidth() - 3 // just in case for some extra padding
 
 	// Calculate the total width based on content (plus padding and borders)
 	totalWidth := 1 // Initial border character
 	for _, col := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
 		totalWidth += widths[col] + 3 // width + 2 for padding + 1 for border
 	}
-	
+
 	// If URL column exceeds a reasonable size or the total width exceeds terminal width,
 	// limit the URL column width to fit within the terminal
 	if widths["URL"] > 60 || totalWidth > terminalWidth {
 		// Calculate how much space we have for URL
 		// Start with terminal width, subtract space needed for other columns and borders
 		availableForURL := terminalWidth - (totalWidth - widths["URL"] - 3)
-		
+
 		// Ensure URL column gets at least a minimum width
 		minURLWidth := 20
 		if availableForURL < minURLWidth {
 			availableForURL = minURLWidth
 		}
-		
+
 		// Don't make URL column larger than needed
 		if availableForURL > widths["URL"] {
 			availableForURL = widths["URL"]
 		}
-		
+
 		widths["URL"] = availableForURL
 	}
-	
+
 	// Recalculate total width after adjustments
 	totalWidth = 1 // Initial border character
 	for _, col := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
@@ -458,7 +458,7 @@ func printResults(results []EndpointResult, targetName string, configName string
 
 	// Print table header AFTER the title row
 	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths, neutral, neutral)
-	
+
 	// Update the header divider to use proper box drawing characters
 	headerDivider := "├"
 	for i, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
@@ -525,7 +525,7 @@ func printResults(results []EndpointResult, targetName string, configName string
 			}
 		}
 		fmt.Println(neutral(summaryDivider))
-		
+
 		avgDuration := totalDuration / time.Duration(total)
 		summaryStr := fmt.Sprintf("Total: %d, Success: %d, Failed: %d, Avg: %.2fs",
 			total, successful, failed, avgDuration.Seconds())
