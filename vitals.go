@@ -21,6 +21,19 @@ import (
 	"golang.org/x/term"
 )
 
+// Light Box Drawing Characters (Unicode)
+// ─ U+2500  Light Horizontal
+// │ U+2502  Light Vertical
+// ┌ U+250C  Light Down and Right (top-left corner)
+// ┐ U+2510  Light Down and Left (top-right corner)
+// └ U+2514  Light Up and Right (bottom-left corner)
+// ┘ U+2518  Light Up and Left (bottom-right corner)
+// ├ U+251C  Light Vertical and Right (left tee)
+// ┤ U+2524  Light Vertical and Left (right tee)
+// ┬ U+252C  Light Down and Horizontal (top tee)
+// ┴ U+2534  Light Up and Horizontal (bottom tee)
+// ┼ U+253C  Light Vertical and Horizontal (center cross)
+
 // stringSlice is a custom type that implements flag.Value interface for string slices
 type stringSlice []string
 
@@ -301,16 +314,18 @@ func constructURL(baseURL, endpoint string) string {
 }
 
 // printDivider prints a horizontal divider line for the table
-func printDivider(widths map[string]int, neutral func(a ...interface{}) string) {
-	divider := "┌"
+func printDivider(widths map[string]int, neutral func(a ...interface{}) string, edgePieceChar string) {
+	divider := "├"
+	// divider := "┌"
 	columnNames := []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"}
 
 	for i, width := range columnNames {
 		divider += strings.Repeat("─", widths[width]+2)
 		if i < len(columnNames)-1 {
-			divider += "┬"
+			divider += edgePieceChar
 		} else {
-			divider += "┐"
+			// divider += "┐"
+			divider += "┤"
 		}
 	}
 	fmt.Println(neutral(divider))
@@ -352,12 +367,14 @@ func printResults(results []EndpointResult, targetName string, configName string
 
 	// Calculate column widths
 	widths := map[string]int{
-		"METHOD":   6,  // "METHOD"
-		"URL":      3,  // "URL"
-		"STATUS":   6,  // "STATUS"
-		"DURATION": 10, // "DURATION"
-		"RESULT":   6,  // "RESULT"
+		"METHOD":   6, // "METHOD"
+		"URL":      3, // "URL"
+		"STATUS":   6, // "STATUS"
+		"DURATION": 8, // "DURATION"
+		"RESULT":   6, // "RESULT"
 	}
+
+	columnNames := []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"}
 
 	// Pre-process results to determine column widths
 	tableData := make([][]string, 0, len(results))
@@ -410,7 +427,7 @@ func printResults(results []EndpointResult, targetName string, configName string
 
 	// Calculate the total width based on content (plus padding and borders)
 	totalWidth := 1 // Initial border character
-	for _, col := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+	for _, col := range columnNames {
 		totalWidth += widths[col] + 3 // width + 2 for padding + 1 for border
 	}
 
@@ -437,7 +454,7 @@ func printResults(results []EndpointResult, targetName string, configName string
 
 	// Recalculate total width after adjustments
 	totalWidth = 1 // Initial border character
-	for _, col := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
+	for _, col := range columnNames {
 		totalWidth += widths[col] + 3 // width + 2 for padding + 1 for border
 	}
 
@@ -454,22 +471,10 @@ func printResults(results []EndpointResult, targetName string, configName string
 	titleRow := "│" + strings.Repeat(" ", padding) + title
 	titleRow += strings.Repeat(" ", totalWidth-2-padding-len(title)) + "│"
 	fmt.Println(neutral(titleRow))
-	fmt.Println(neutral("├" + strings.Repeat("─", totalWidth-2) + "┤"))
 
-	// Print table header AFTER the title row
+	printDivider(widths, neutral, "┬")
 	printRow("METHOD", "URL", "STATUS", "DURATION", "RESULT", widths, neutral, neutral)
-
-	// Update the header divider to use proper box drawing characters
-	headerDivider := "├"
-	for i, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
-		headerDivider += strings.Repeat("─", widths[width]+2)
-		if i < 4 {
-			headerDivider += "┼"
-		} else {
-			headerDivider += "┤"
-		}
-	}
-	fmt.Println(neutral(headerDivider))
+	printDivider(widths, neutral, "┼")
 
 	// Print table rows
 	for i, row := range tableData {
@@ -514,17 +519,7 @@ func printResults(results []EndpointResult, targetName string, configName string
 	// Print summary statistics row
 	total := successful + failed
 	if total > 0 {
-		// Use a proper divider for the summary section
-		summaryDivider := "├"
-		for i, width := range []string{"METHOD", "URL", "STATUS", "DURATION", "RESULT"} {
-			summaryDivider += strings.Repeat("─", widths[width]+2)
-			if i < 4 {
-				summaryDivider += "┴"
-			} else {
-				summaryDivider += "┤"
-			}
-		}
-		fmt.Println(neutral(summaryDivider))
+		printDivider(widths, neutral, "┴")
 
 		avgDuration := totalDuration / time.Duration(total)
 		summaryStr := fmt.Sprintf("Total: %d, Success: %d, Failed: %d, Avg: %.2fs",
