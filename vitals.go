@@ -692,6 +692,10 @@ func main() {
 	var outputMutex sync.Mutex
 	var wg sync.WaitGroup
 
+	// Track overall success/failure status
+	var overallSuccess = true
+	var successMutex sync.Mutex
+
 	// Create a semaphore if concurrency is limited
 	var sem chan struct{}
 	if flags.concurrency > 0 {
@@ -750,6 +754,16 @@ func main() {
 					}
 
 					results := processTarget(client, target, statusRanges, sem, flags.verbosity)
+
+					// Check if any requests failed and update overall success status
+					for _, result := range results {
+						if result.Error != nil || !result.Success {
+							successMutex.Lock()
+							overallSuccess = false
+							successMutex.Unlock()
+							break
+						}
+					}
 
 					if collectResults {
 						jsonTargetResults, err := printJSONResults(results, targetName, configName, flags.verbosity)
@@ -821,5 +835,10 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(htmlOutput)
+	}
+
+	// Exit with non-zero status if any requests failed
+	if !overallSuccess {
+		os.Exit(1)
 	}
 }
